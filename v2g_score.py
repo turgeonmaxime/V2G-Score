@@ -1,5 +1,9 @@
 import pandas as pd
 import numpy as np
+import logging
+import argparse
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class V2GAnnotator:
     def __init__(self):
@@ -7,6 +11,7 @@ class V2GAnnotator:
         self.eqtl = None
         self.gene_map = None
         self.results = None
+        self.logger = logging.getLogger(__name__)
 
     def load_data(self, gwas_df, eqtl_df, gene_map_df):
         """
@@ -15,6 +20,9 @@ class V2GAnnotator:
         self.gwas = gwas_df.copy()
         self.eqtl = eqtl_df.copy() if eqtl_df is not None else None
         self.gene_map = gene_map_df.copy()
+        
+        num_snps = self.gwas['rsid'].nunique()
+        self.logger.info(f"Loaded data for {num_snps} unique GWAS SNPs.")
         
     def map_distance(self):
         """
@@ -35,6 +43,9 @@ class V2GAnnotator:
         
         # Calculate distance score: exp(-d / 100,000)
         within_500kb['distance_score'] = np.exp(-within_500kb['distance'] / 100000)
+        
+        num_mapped = within_500kb['rsid'].nunique()
+        self.logger.info(f"Mapped {num_mapped} SNPs to candidate genes via distance (<=500kb).")
         
         return within_500kb[['rsid', 'gene_id', 'distance', 'distance_score']]
         
@@ -59,6 +70,9 @@ class V2GAnnotator:
         
         # If multiple tissues exist for the same rsid-gene_id pair, take the max score
         max_eqtl = eqtl_scores.groupby(['rsid', 'gene_id'])['eqtl_score'].max().reset_index()
+        
+        num_mapped = max_eqtl['rsid'].nunique()
+        self.logger.info(f"Mapped {num_mapped} SNPs to candidate genes via eQTL evidence.")
         
         return max_eqtl
         
@@ -92,69 +106,33 @@ class V2GAnnotator:
         # Get top 3 per rsid
         top_candidates = combined.groupby('rsid').head(3)
         
+        num_prioritized = top_candidates['rsid'].nunique()
+        self.logger.info(f"Prioritized candidate genes for {num_prioritized} unique SNPs.")
+        
         self.results = top_candidates
         
         if output_file:
-            top_candidates.to_csv(output_file, sep='\t', index=False)
+            top_candidates.to_csv(output_file, index=False)
             
         return top_candidates
 
-def generate_mock_data():
-    """
-    Generate dummy data for 5 SNPs and 10 Genes.
-    """
-    np.random.seed(42)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='V2G-Score: Variant-to-Gene prioritizing tool.')
+    parser.add_argument('--gwas', required=True, help='Path to GWAS TSV file')
+    parser.add_argument('--eqtl', help='Path to eQTL TSV file (optional)')
+    parser.add_argument('--gene_map', required=True, help='Path to Gene Map TSV file')
+    parser.add_argument('--out', required=True, help='Path to output CSV file')
     
-    # 5 SNPs on chr1
-    gwas_data = {
-        'rsid': ['rs1', 'rs2', 'rs3', 'rs4', 'rs5'],
-        'chromosome': ['chr1'] * 5,
-        'position': [1000000, 1500000, 2000000, 2500000, 3000000],
-        'p_value': [5e-8, 1e-7, 5e-9, 2e-6, 1e-10]
-    }
-    gwas_df = pd.DataFrame(gwas_data)
+    args = parser.parse_args()
     
-    # 10 Genes on chr1
-    gene_data = {
-        'gene_id': [f'GENE{i}' for i in range(1, 11)],
-        'chromosome': ['chr1'] * 10,
-        'tss_position': [
-            1050000,  # 50kb from rs1 -> distance score: 0.606
-            1400000,  # 100kb from rs2 -> distance score: 0.367
-            1550000,  # 50kb from rs2 -> distance score: 0.606
-            2010000,  # 10kb from rs3 -> distance score: 0.904
-            2600000,  # 100kb from rs4 -> distance score: 0.367
-            3000000,  # 0kb from rs5 -> distance score: 1.0
-            4000000,  # Far
-            4500000,  # Far
-            5000000,  # Far
-            5500000   # Far
-        ]
-    }
-    gene_map_df = pd.DataFrame(gene_data)
+    logging.info("Starting V2G-Score process...")
     
-    # eQTL evidence
-    eqtl_data = {
-        'rsid': ['rs1', 'rs1', 'rs2', 'rs3', 'rs4'],
-        'gene_id': ['GENE1', 'GENE2', 'GENE3', 'GENE4', 'GENE10'], # GENE10 is far away from rs4 but has eQTL
-        'p_value': [1e-15, 1e-5, 1e-20, 1e-8, 1e-2],
-        'tissue': ['Liver', 'Liver', 'Brain', 'Blood', 'Blood']
-    }
-    eqtl_df = pd.DataFrame(eqtl_data)
+    gwas_df = pd.read_csv(args.gwas, sep='\t')
+    eqtl_df = pd.read_csv(args.eqtl, sep='\t') if args.eqtl else None
+    gene_map_df = pd.read_csv(args.gene_map, sep='\t')
     
-    return gwas_df, eqtl_df, gene_map_df
-
-if __name__ == "__main__":
-    print("Generating mock data...")
-    gwas, eqtl, gene_map = generate_mock_data()
-    
-    print("Initializing V2GAnnotator...")
     annotator = V2GAnnotator()
-    annotator.load_data(gwas, eqtl, gene_map)
+    annotator.load_data(gwas_df, eqtl_df, gene_map_df)
     
-    output_path = "v2g_results.tsv"
-    print(f"Generating report and saving to {output_path}...")
-    results = annotator.generate_report(output_path)
-    
-    print("\nTop 3 Candidate Genes per GWAS Hit:")
-    print(results.to_string(index=False))
+    annotator.generate_report(args.out)
+    logging.info(f"Report saved to {args.out}")
